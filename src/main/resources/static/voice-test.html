@@ -271,6 +271,8 @@ registerProcessor('pcm-collector', PcmCollector);
             for (let offset = 0; offset < silence.length; offset += samplesPerChunk) {
                 ws.send(silence.slice(offset, offset + samplesPerChunk).buffer);
             }
+            // 显式结束上行，后端会排完 ASR 尾句和全部回复，再通知整次对话结束。
+            ws.send(JSON.stringify({ type: 'input_end' }));
         }
 
         userStopped = true;
@@ -295,13 +297,17 @@ registerProcessor('pcm-collector', PcmCollector);
             let msg; try { msg = JSON.parse(e.data); } catch (_) { return; }
             switch (msg.type) {
                 case 'asr':
-                    log(`ASR ${msg.final ? '[最终]' : '[实时]'} ${msg.text || '(空)'}`,
-                        msg.final ? 'asr-final' : 'asr-partial');
-                    // 最终识别结果之后由后端明确通知完成或失败。
-                    if (msg.final && userStopped) {
-                        $caption.textContent = '';
-                        $products.innerHTML = '';
+                    if (msg.final === true && typeof msg.text === 'string' && msg.text.trim()) {
+                        log(`ASR [最终] ${msg.text.trim()}`, 'asr-final');
                     }
+                    break;
+                case 'turn_start':
+                    responseFinished = false;
+                    $caption.textContent = '';
+                    $products.innerHTML = '';
+                    break;
+                case 'turn_done':
+                    log('本轮回复完成');
                     break;
                 case 'caption':
                     appendCaption(msg.text);
@@ -311,7 +317,7 @@ registerProcessor('pcm-collector', PcmCollector);
                     break;
                 case 'done':
                     responseFinished = true;
-                    log('Agent 回复完成');
+                    log('所有回复完成');
                     finishResponse(session);
                     break;
                 case 'error':
