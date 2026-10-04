@@ -10,8 +10,11 @@ import com.zhaoyijin.voiceshopping.voice.TtsService;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.reactivex.Flowable;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.test.util.ReflectionTestUtils;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Sinks;
 import java.math.BigDecimal;
 import java.util.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -150,6 +153,178 @@ class RecommendationRoutingTest {
         RecommendCandidatesService candidates = new RecommendCandidatesService(null, products, null);
         assertEquals(List.of("跑鞋"), candidates.availableCategories(new SessionScope(1L, List.of(1L), null)));
         assertEquals(List.of("手表", "跑鞋"), candidates.availableCategories(null));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void explicitSevenHundredOverridesCheaperAndKeepsEligiblePreviousShoes(boolean stream) {
+        state.setSlots(new HashMap<>(Map.of("category", "跑鞋", "budget", 1000)));
+        state.setLastRecommendations(List.of(7L, 10L, 6L));
+        List<RecommendedItem> affordable = affordableShoes();
+        doReturn(new IntentResult(Intent.PRODUCT_COMPARE,
+                Map.of("category", "跑鞋", "budget", 700, "priceDirection", "cheaper"), .99))
+                .when(intents).classify("routing", "七百再推荐一下。");
+        when(recommendations.recommend(eq("routing"), eq(1L), eq("七百再推荐一下。"),
+                argThat(slots -> Objects.equals(700, slots.get("budget"))
+                        && !slots.containsKey("excludeProductIds") && !slots.containsKey("priceMin"))))
+                .thenReturn(new RecommendResult(affordable, "professional"));
+        when(emotion.wrap(anyString(), anyString(), anyString(), any()))
+                .thenAnswer(i -> new EmotionResult("预算内的跑鞋", ((RecommendResult) i.getArgument(3)).items()));
+
+        assertEquals(affordable, replyItems(stream, "七百再推荐一下。"));
+        assertEquals(700, state.getSlots().get("budget"));
+        assertFalse(state.getSlots().containsKey("priceDirection"));
+        assertEquals(List.of(6L, 7L), state.getLastRecommendations());
+        verifyNoInteractions(products, orders);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void newBudgetRemovesLegacyComparisonFiltersButKeepsShoppingPreferences(boolean stream) {
+        state.setPhase("CLARIFY"); state.setPendingAsk("budget");
+        state.setSlots(new HashMap<>(Map.of("category", "跑鞋", "budget", 719, "budgetMin", 600,
+                "priceDirection", "cheaper", "priceMin", 900, "excludeProductIds", List.of(7L, 10L, 6L),
+                "brand", "Nike", "scenario", "水泥路", "gender", "male")));
+        doReturn(new IntentResult(Intent.PRODUCT_RECOMMENDATION, Map.of("budget", 800), .99))
+                .when(intents).classify("routing", "预算800元。");
+        List<RecommendedItem> shoes = List.of(affordableShoes().get(0));
+        when(recommendations.recommend(eq("routing"), eq(1L), eq("预算800元。"),
+                argThat(slots -> Objects.equals(800, slots.get("budget"))
+                        && !slots.containsKey("excludeProductIds") && !slots.containsKey("priceMin"))))
+                .thenReturn(new RecommendResult(shoes, "professional"));
+        when(emotion.wrap(anyString(), anyString(), anyString(), any()))
+                .thenAnswer(i -> new EmotionResult("预算内的跑鞋", ((RecommendResult) i.getArgument(3)).items()));
+
+        assertEquals(shoes, replyItems(stream, "预算800元。"));
+        assertEquals(Map.of("category", "跑鞋", "budget", 800, "brand", "Nike",
+                "scenario", "水泥路", "gender", "male"), state.getSlots());
+        assertNull(state.getPendingAsk());
+        assertEquals("RECOMMEND", state.getPhase());
+    }
+
+    @Test void eightHundredStillWorksWhenModelCallsItAComparison() {
+        state.setSlots(new HashMap<>(Map.of("category", "跑鞋", "budget", 719,
+                "priceDirection", "cheaper", "excludeProductIds", List.of(7L, 10L, 6L))));
+        doReturn(new IntentResult(Intent.PRODUCT_COMPARE, Map.of("budget", 800), .99))
+                .when(intents).classify("routing", "预算800元。");
+        streamText("预算800元。");
+        verify(recommendations).recommend("routing", 1L, "预算800元。", Map.of("category", "跑鞋", "budget", 800));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void explicitFinancialNumeralReplacesOldBudgetEvenWhenModelMissesIt(boolean stream) {
+        state.getSlots().put("budget", 800);
+        String input = "我把预算调整到七佰再推荐一下。";
+        doReturn(new IntentResult(Intent.CLARIFY_NEEDED, Map.of(), .8))
+                .when(intents).classify("routing", input);
+        if (stream) streamText(input);
+        else service.handle("routing", 1L, input);
+        verify(recommendations).recommend("routing", 1L, input, Map.of("category", "跑鞋", "budget", 700));
+        assertEquals(700, state.getSlots().get("budget"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void unfinishedBudgetAsksForAmountWithoutReusingOldBudget(boolean stream) {
+        state.setSlots(new HashMap<>(Map.of("category", "跑鞋", "budget", 1000)));
+        state.setLastRecommendations(List.of(7L, 10L, 6L));
+        String text = stream ? streamText("我把预算调整到。")
+                : service.handle("routing", 1L, "我把预算调整到。").speechText();
+        assertTrue(text.contains("预算") && text.contains("多少"));
+        assertEquals("budget", state.getPendingAsk());
+        assertEquals("CLARIFY", state.getPhase());
+        assertEquals("跑鞋", state.getSlots().get("category"));
+        assertEquals(1000, state.getSlots().get("budget"));
+        verifyNoInteractions(intents, recommendations, orders);
+    }
+
+    @Test void relativeCheaperStillUsesPreviousPricesWithoutReusingOldExclusions() {
+        state.setLastRecommendations(List.of(7L, 10L, 6L));
+        state.getSlots().put("excludeProductIds", List.of(99L));
+        state.getSlots().put("priceMin", 1000);
+        List<ProductEntity> previous = new ArrayList<>();
+        for (int price : List.of(699, 899, 599)) {
+            ProductEntity p = new ProductEntity(); p.setPrice(BigDecimal.valueOf(price)); previous.add(p);
+        }
+        when(products.findByIdIn(List.of(7L, 10L, 6L))).thenReturn(previous);
+        doReturn(new IntentResult(Intent.PRODUCT_COMPARE, Map.of("priceDirection", "cheaper"), .99))
+                .when(intents).classify("routing", "再便宜一点");
+        streamText("再便宜一点");
+        assertEquals(719, state.getSlots().get("budget"));
+        assertEquals(List.of(7L, 10L, 6L), state.getSlots().get("excludeProductIds"));
+        assertFalse(state.getSlots().containsKey("priceMin"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void explicitRangeOverridesCheaperAndClearsOldComparisonFilters(boolean stream) {
+        state.setSlots(new HashMap<>(Map.of("category", "跑鞋", "budget", 2000,
+                "priceMin", 1800, "excludeProductIds", List.of(9L, 8L, 2L))));
+        state.setLastRecommendations(List.of(9L, 8L, 2L));
+        String input = "感觉有点贵了，我预算嗯1000到1500吧。";
+        doReturn(new IntentResult(Intent.PRODUCT_COMPARE,
+                Map.of("budget", 1500, "priceDirection", "cheaper"), .99))
+                .when(intents).classify("routing", input);
+        if (stream) streamText(input);
+        else service.handle("routing", 1L, input);
+        verify(recommendations).recommend("routing", 1L, input,
+                Map.of("category", "跑鞋", "budget", 1500, "budgetMin", 1000));
+        verify(intents, times(1)).classify("routing", input);
+        verifyNoInteractions(products, emotion);
+    }
+
+    @Test void laterBrandChangeRetainsUserRange() {
+        state.setSlots(new HashMap<>(Map.of("category", "跑鞋", "budget", 1500, "budgetMin", 1000)));
+        doReturn(new IntentResult(Intent.PRODUCT_RECOMMENDATION, Map.of("brand", "Nike"), .99))
+                .when(intents).classify("routing", "看看耐克的");
+        streamText("看看耐克的");
+        verify(recommendations).recommend("routing", 1L, "看看耐克的",
+                Map.of("category", "跑鞋", "brand", "Nike", "budget", 1500, "budgetMin", 1000));
+    }
+
+    @Test void emptyRangeReportsBothBounds() {
+        doReturn(new IntentResult(Intent.PRODUCT_RECOMMENDATION, Map.of(), .99))
+                .when(intents).classify("routing", "预算1000到1500");
+        assertTrue(streamText("预算1000到1500").contains("1000到1500元之间"));
+    }
+
+    @Test void explicitRangeStreamsFirstSentenceWithoutWaitingForTheFullReply() {
+        state.setLastRecommendations(List.of(9L, 8L, 2L));
+        String input = "感觉贵了，预算1000到1500";
+        doReturn(new IntentResult(Intent.PRODUCT_COMPARE, Map.of("priceDirection", "cheaper"), .99))
+                .when(intents).classify("routing", input);
+        List<RecommendedItem> items = List.of(new RecommendedItem(5L, "Clifton 9",
+                BigDecimal.valueOf(1180), "轻量缓震", 1.0, Map.of()));
+        when(recommendations.recommend(anyString(), anyLong(), anyString(), anyMap()))
+                .thenReturn(new RecommendResult(items, "professional"));
+        Sinks.Many<String> tokens = Sinks.many().unicast().onBackpressureBuffer();
+        when(streaming.streamWrap(eq("routing"), eq(input), any())).thenReturn(tokens.asFlux());
+        List<StreamChunk> chunks = new ArrayList<>();
+        boolean[] complete = {false};
+        var subscription = service.streamHandle("routing", 1L, input)
+                .subscribe(chunks::add, e -> fail(e), () -> complete[0] = true);
+        try {
+            assertEquals(items, chunks.get(0).products());
+            tokens.tryEmitNext("预算1000到1500元。失配商品已排除。");
+            assertTrue(chunks.stream().anyMatch(c -> c.text() != null && c.text().contains("预算1000")));
+            assertFalse(complete[0], "First caption must arrive before all model output completes");
+            verifyNoInteractions(emotion, products);
+            verify(intents, times(1)).classify("routing", input);
+            tokens.tryEmitComplete();
+            assertTrue(complete[0]);
+        } finally { subscription.dispose(); }
+    }
+
+    Object replyItems(boolean stream, String input) {
+        if (!stream) return service.handle("routing", 1L, input).displayBlocks();
+        return service.streamHandle("routing", 1L, input).collectList().block().stream()
+                .filter(c -> c.type() == StreamChunk.Type.PRODUCTS).findFirst().orElseThrow().products();
+    }
+
+    List<RecommendedItem> affordableShoes() {
+        return List.of(new RecommendedItem(6L, "Pegasus 39", BigDecimal.valueOf(599), "日常跑步", 1.0, Map.of()),
+                new RecommendedItem(7L, "粉色跑鞋", BigDecimal.valueOf(699), "轻便", 1.0, Map.of()));
     }
 
     ProductEntity catalogProduct(Long merchant, String category, int stock) {
