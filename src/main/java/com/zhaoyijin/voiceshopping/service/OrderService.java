@@ -14,6 +14,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 @Service
@@ -42,6 +43,11 @@ public class OrderService {
      */
     public List<OrderEntity> listMine() {
         return orderRepo.findByUserIdOrderByCreatedAtDesc(currentUser.id());
+    }
+
+    /** 语音会话内查询刚才的订单，同时限定所属用户。 */
+    public Optional<OrderEntity> latestForSession(String sessionId, Long userId) {
+        return orderRepo.findFirstBySessionIdAndUserIdOrderByCreatedAtDesc(sessionId, userId);
     }
 
     /**
