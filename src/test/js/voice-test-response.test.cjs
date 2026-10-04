@@ -44,10 +44,23 @@ test('completion waits until queued speech has played before closing', () => {
     p.advance(1); assert.equal(p.closes(),1);
 });
 
-test('completion received while recording is handled after stop', async () => {
+test('an earlier turn finishing while recording cannot close a later reply after stop', async () => {
     const p = page(); vm.runInContext('state=State.RECORDING; userStopped=false; recordStartAt=Date.now()-2000;',p.context);
-    p.message({type: 'done'}); p.advance(5000); assert.equal(p.closes(),0);
-    await vm.runInContext('stop()',p.context); p.advance(0); assert.equal(p.closes(),1);
+    p.message({type: 'turn_done'}); p.advance(5000); assert.equal(p.closes(),0);
+    await vm.runInContext('stop()',p.context); p.advance(0); assert.equal(p.closes(),0);
+    p.message({type: 'asr', text: '补充预算一千元', final: true});
+    p.message({type: 'turn_start'});
+    p.message({type: 'caption', text: '第二轮回复'});
+    p.message({type: 'turn_done'}); p.advance(5000); assert.equal(p.closes(),0);
+    p.message({type: 'done'}); p.advance(0); assert.equal(p.closes(),1);
+});
+
+test('a queued ASR result preserves current caption until its turn starts', () => {
+    const p = page(); p.message({type: 'caption', text: '当前回复'});
+    p.message({type: 'asr', text: '补充一句', final: true});
+    assert.equal(vm.runInContext('$caption.textContent', p.context), '当前回复');
+    p.message({type: 'turn_start'});
+    assert.equal(vm.runInContext('$caption.textContent', p.context), '');
 });
 
 test('a server error ends waiting instead of leaving a silent timeout', () => {
