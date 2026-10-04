@@ -9,7 +9,7 @@ import java.util.Set;
 final class CommonConfirmer {
 
     /**
-     * 高频简短确认词——这些词意图基本固定为 ORDER_CONFIRM / 继续推荐。
+     * 简短回答本身不能证明用户同意下单，订单确认由编排层结合待确认订单判断。
      */
     private static final Set<String> WORDS = Set.of(
             "嗯", "好", "好的", "对", "是", "行", "可以",
@@ -17,7 +17,15 @@ final class CommonConfirmer {
     );
 
     static final IntentResult CONFIRMER_INTENT =
-            new IntentResult(Intent.ORDER_CONFIRM, Map.of("confirmer", true), 0.95);
+            new IntentResult(Intent.CLARIFY_NEEDED, Map.of("confirmer", true), 0.95);
+
+    static final IntentResult CONTINUE_INTENT =
+            new IntentResult(Intent.PRODUCT_RECOMMENDATION, Map.of(), 0.95);
+
+    static boolean isContinuation(String utterance) {
+        return utterance != null && Set.of("继续", "下一个", "再来", "换一个")
+                .contains(utterance.trim().replaceAll("[，。！？,.!?\\s]", ""));
+    }
 
     static boolean isCommonConfirmer(String utterance) {
         if (utterance == null) return false;
