@@ -7,6 +7,7 @@ import com.alibaba.dashscope.audio.tts.SpeechSynthesisResult;
 import com.alibaba.dashscope.common.ResultCallback;
 import io.reactivex.BackpressureStrategy;
 import io.reactivex.Flowable;
+import io.reactivex.disposables.SerialDisposable;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -65,13 +66,18 @@ public class TtsService {
             };
 
             SpeechSynthesizer synthesizer = new SpeechSynthesizer(param, callback);
+            SerialDisposable input = new SerialDisposable();
+            emitter.setCancellable(() -> {
+                input.dispose();
+                synthesizer.streamingCancel();
+            });
 
             // 文字流来一段就 streamingCall 一段，结束时调 streamingComplete 触发尾包
-            textStream.subscribe(
+            input.set(textStream.subscribe(
                     synthesizer::streamingCall,
                     emitter::onError,
-                    synthesizer::streamingComplete
-            );
+                    synthesizer::asyncStreamingComplete
+            ));
         }, BackpressureStrategy.BUFFER);
     }
 }
