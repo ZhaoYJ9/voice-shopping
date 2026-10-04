@@ -17,6 +17,7 @@ function pageWithSocket(readyState) {
     const socket = {
         readyState,
         send(frame) {
+            if (typeof frame === 'string') { frames.push(frame); return; }
             // Match the real server's binary message limit, rather than accepting any frame.
             if (frame.byteLength > 8192) throw new RangeError('WebSocket message exceeds 8192 bytes');
             frames.push(new Uint8Array(frame));
@@ -46,9 +47,11 @@ test('stopping recording sends the complete silence tail without exceeding the s
     const { context, frames } = pageWithSocket(1);
     await vm.runInContext('stop()', context);
 
-    assert.ok(frames.length > 0);
-    assert.equal(frames.reduce((total, frame) => total + frame.byteLength, 0), 25600);
-    for (const frame of frames) {
+    assert.deepEqual(JSON.parse(frames.at(-1)), {type: 'input_end'});
+    const audio = frames.slice(0, -1);
+    assert.ok(audio.length > 0);
+    assert.equal(audio.reduce((total, frame) => total + frame.byteLength, 0), 25600);
+    for (const frame of audio) {
         assert.ok(frame.byteLength <= 8192);
         assert.ok(frame.every(sample => sample === 0));
     }
