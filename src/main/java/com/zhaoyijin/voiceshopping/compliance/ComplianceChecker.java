@@ -43,7 +43,10 @@ public class ComplianceChecker {
 
         // 绝对化用词替换
         for (String abs : absolutePatterns) {
-            cleaned = cleaned.replace(abs, soften(abs));
+            // 商品顺序不是营销排名；保留“第一款/第一个”等可供用户指代的序号。
+            cleaned = "第一".equals(abs)
+                    ? cleaned.replaceAll("第一(?!(?:款|个|件|双|项|种))", soften(abs))
+                    : cleaned.replace(abs, soften(abs));
         }
         // 敏感词直接过滤为 *
         for (String w : sensitiveWords) {
