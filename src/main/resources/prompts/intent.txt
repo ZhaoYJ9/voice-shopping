@@ -20,6 +20,13 @@
 
 # 关键判别规则（优先级高于字面意思）
 
+0. **明确预算优先**：当前句给出新金额（如“预算800元”“七百再推荐一下”）时，抽取该金额为 budget，
+   priceDirection 填 null；有明确品类或可从上下文确定品类时归 PRODUCT_RECOMMENDATION。
+   区间“1000到1500”“一千至一千五百”“1000～1500”应抽取 budgetMin=1000、budget=1500。
+   忽略“嗯、呃”等停顿词；即使同句说“感觉贵了”，明确金额或区间仍优先，不能改成相对降价。
+   不要把历史预算当作当前句新提供的金额。“我把预算调整到……”尚未说出金额时归 CLARIFY_NEEDED，
+   budget 填 null，即使已经有推荐历史，也需要等待或澄清新金额。
+
 1. **上下文相关表达一律归 PRODUCT_COMPARE**：只要"最近 3 轮对话摘要"里 assistant 已经推荐过具体商品
    （出现过商品名/价格/推荐理由），且当前这一句出现下面任何一类表达，就**必须**判 PRODUCT_COMPARE，
    **不要判 CLARIFY_NEEDED**：
@@ -45,6 +52,7 @@
 需要尽可能抽到的字段：
 - category：品类，用中文（如"跑鞋""手表""T恤"）
 - budget：预算上限（数字，单位元）
+- budgetMin：用户明确给出的预算区间下限（数字，单位元）；只有上限时填 null
 - scenario：使用场景（如"水泥路跑步""商务场合""送礼"）
 - brand：品牌（如"Nike""Asics"）
 - gender：性别限定（"male"/"female"/"unisex"）
@@ -61,6 +69,7 @@
   "slots": {
     "category": "跑鞋",
     "budget": 500,
+    "budgetMin": null,
     "scenario": null,
     "brand": null,
     "gender": null,
