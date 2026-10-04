@@ -36,6 +36,13 @@ public class SqlFilterBuilder {
             params.add(n.doubleValue());
         }
 
+        // 用户明确给出的区间下限，与比较时临时生成的 priceMin 分开保存。
+        Object budgetMin = slots.get("budgetMin");
+        if (budgetMin instanceof Number n) {
+            frags.add("price >= ?");
+            params.add(n.doubleValue());
+        }
+
         // 对比类场景下界：expensive 方向用，把低于下界的都过滤掉
         Object priceMin = slots.get("priceMin");
         if (priceMin instanceof Number n) {
