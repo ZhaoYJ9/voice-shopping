@@ -9,6 +9,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class SqlFilterBuilderTest {
     @Test
+    void explicitRangeFiltersBothBoundsInTheProductQuery() {
+        SqlFilterBuilder.Filter filter = SqlFilterBuilder.fromSlots(
+                Map.of("category", "跑鞋", "budgetMin", 1000, "budget", 1500));
+        assertEquals("category_l2 = ? AND price <= ? AND price >= ?", filter.clause());
+        assertEquals(List.of("跑鞋", 1500.0, 1000.0), filter.params());
+    }
+
+    @Test
     void sportsShoesIncludeShoeSubcategoriesWithoutLosingBudget() {
         SqlFilterBuilder.Filter filter = SqlFilterBuilder.fromSlots(
                 Map.of("category", "运动鞋", "budget", 1000));
