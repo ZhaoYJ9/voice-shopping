@@ -24,12 +24,17 @@ import reactor.core.publisher.Flux;
 import java.math.BigDecimal;
 import java.nio.ByteBuffer;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class OrchestratorService {
+
+    private static final Pattern CATEGORY_MENTION =
+            Pattern.compile("运动鞋|跑鞋|手表|耳机|口红|衣服|服装|T恤|鞋", Pattern.CASE_INSENSITIVE);
 
     private final IntentService intentService;
     private final ClarifyService clarifyService;
@@ -71,24 +76,21 @@ public class OrchestratorService {
 
             SessionStateEntity state = stateService.load(sessionId);
 
-            // 短路：ORDER_CONFIRM 状态直接走订单分支，不跑 IntentAgent
-            if ("ORDER_CONFIRM".equals(state.getPhase())) {
-                return handleOrderConfirm(sessionId, userId, state, utterance);
-            }
-
-            IntentResult intent = intentService.classify(sessionId, utterance);
+            IntentResult intent = resolveIntent(sessionId, state, utterance);
             log.info("[Orc] sessionId={} intent={} slots={}", sessionId, intent.intent(), intent.slots());
 
-            // 意图兜底矫正：LLM 对"便宜点/换一款"这类价格方向表达经常判成 CLARIFY_NEEDED，
-            // 但只要上一轮已经推了商品 + 本轮抽到了 priceDirection，就强制按 PRODUCT_COMPARE 处理
-            intent = reviseIntentByContext(state, intent);
+            leaveOrderConfirmationForShopping(sessionId, state, intent);
+            state.setCurrentIntent(intent.intent().name());
 
             EmotionResult result = switch (intent.intent()) {
                 case PRODUCT_RECOMMENDATION -> handleRecommendation(sessionId, userId, state, utterance, intent);
                 case CLARIFY_NEEDED -> handleClarify(sessionId, state, utterance, intent);
                 case PRODUCT_COMPARE -> handleCompare(sessionId, userId, state, utterance, intent);
-                case ORDER_CONFIRM -> handleOrderConfirm(sessionId, userId, state, utterance);
-                case CHITCHAT -> handleChitchat(sessionId, userId, utterance);
+                case ORDER_CONFIRM -> isOrderStatusQuestion(utterance)
+                        ? handleOrderStatus(sessionId, userId, state)
+                        : handleOrderConfirm(sessionId, userId, state, utterance);
+                case CHITCHAT -> isCatalogQuestion(utterance)
+                        ? handleCatalog(sessionId, state) : handleChitchat(sessionId, userId, utterance);
                 case OUT_OF_SCOPE -> handleOutOfScope(sessionId, utterance);
             };
 
@@ -135,6 +137,8 @@ public class OrchestratorService {
         state.setPhase("RECOMMEND");
         RecommendResult rec = recommendService.recommend(sessionId, userId, utterance, slots);
         state.setLastRecommendations(rec.items().stream().map(RecommendedItem::productId).toList());
+        if (rec.items().isEmpty()) return emptyRecommendation(state, slots);
+        state.setPendingAsk(null);
 
         // 旁路：多视角点评团（15 节 PerspectiveHubService）。失败/关闭时降级为原始 utterance
         String contextForEmotion = utterance;
@@ -151,12 +155,27 @@ public class OrchestratorService {
 
     private EmotionResult handleClarify(String sessionId, SessionStateEntity state,
                                         String utterance, IntentResult intent) {
+        if (intent.slots() != null && Boolean.TRUE.equals(intent.slots().get("confirmer"))) {
+            // 对“可以”的指向不作猜测，也不把旧预算悄悄改成无限制。
+            if ("budget".equals(state.getPendingAsk())) {
+                state.setPhase("CLARIFY");
+                return new EmotionResult("可以，新的预算上限是多少元？", List.of());
+            }
+            if (state.getLastRecommendations() != null && !state.getLastRecommendations().isEmpty()) {
+                return new EmotionResult("你想选哪一款，还是继续看其他商品？", List.of());
+            }
+            state.setPhase("CLARIFY");
+            state.setPendingAsk("category");
+            return new EmotionResult("你想看哪一类商品？也可以告诉我预算和用途。", List.of());
+        }
         // 用户第一次就说得很模糊（"最近想买点东西"），用意图里抽到的 slots 开始
         Map<String, Object> slots = new HashMap<>(intent.slots());
         state.setSlots(slots);
         state.setPhase("CLARIFY");
 
         ClarifyResult clarify = clarifyService.decide(sessionId, utterance, slots);
+        state.setPendingAsk(clarify.action() == ClarifyResult.Action.ASK
+                ? clarify.missingSlots().get(0) : null);
         return new EmotionResult(
                 clarify.action() == ClarifyResult.Action.ASK
                         ? clarify.questionToAsk()
@@ -217,6 +236,8 @@ public class OrchestratorService {
         state.setSlots(slots);
         state.setPhase("RECOMMEND");
         state.setLastRecommendations(rec.items().stream().map(RecommendedItem::productId).toList());
+        if (rec.items().isEmpty()) return emptyRecommendation(state, slots);
+        state.setPendingAsk(null);
         String userNeeds = formatUserNeeds(slots);
         return emotionService.wrap(sessionId, utterance, userNeeds, rec);
     }
@@ -226,6 +247,12 @@ public class OrchestratorService {
         // 已经有 pending 单了，判断是 YES 还是 NO
         PendingOrderStore.PendingOrder pending = pendingStore.get(sessionId);
         if (pending != null) {
+            // 否定优先，避免把“不要确认下单”里的“确认”当成同意。
+            if (containsNo(utterance)) {
+                orderService.cancel(sessionId);
+                state.setPhase("RECOMMEND");
+                return new EmotionResult("好的，我没有为你下单。想再聊点别的还是换款看看？", List.of());
+            }
             if (containsYes(utterance)) {
                 OrderEntity order = orderService.confirm(sessionId);
                 state.setPhase("ENDED");
@@ -233,11 +260,6 @@ public class OrchestratorService {
                         String.format("下单成功，订单尾号 %s，1-2 天送达。还有想看的吗？",
                                 order.getOrderNo().substring(0, 6)),
                         List.of());
-            }
-            if (containsNo(utterance)) {
-                orderService.cancel(sessionId);
-                state.setPhase("RECOMMEND");
-                return new EmotionResult("好的，我没有为你下单。想再聊点别的还是换款看看？", List.of());
             }
             return new EmotionResult("那你是确认要这款还是不要？", List.of());
         }
@@ -258,19 +280,131 @@ public class OrchestratorService {
     }
 
     private boolean containsYes(String s) {
-        return s != null && (s.contains("确认") || s.contains("可以") || s.contains("就这")
-                || s.contains("对") || s.contains("好") || s.contains("嗯"));
+        if (s == null) return false;
+        String reply = s.replaceAll("[，。！？,.!?\\s]", "");
+        return switch (reply) {
+            case "确认", "确认下单", "确认购买", "确认要这款", "就这", "就这款", "就它",
+                    "好", "好的", "好吧", "可以", "对", "是", "是的", "嗯", "行",
+                    "要", "我要", "我要这款", "买吧", "下单", "下单吧", "帮我下单" -> true;
+            default -> false;
+        };
     }
 
     private boolean containsNo(String s) {
         return s != null && (s.contains("不要") || s.contains("算了") || s.contains("取消")
-                || s.contains("再想想") || s.contains("等下"));
+                || s.contains("不买") || s.contains("不确认") || s.contains("不下单")
+                || s.contains("别下单") || s.contains("再想想") || s.contains("等下"));
+    }
+
+    private boolean isOrderStatusQuestion(String utterance) {
+        return utterance != null
+                && (utterance.contains("买过") || utterance.contains("已经买")
+                    || utterance.contains("下单了吗") || utterance.contains("下单成功了吗"))
+                && !(utterance.contains("再买") || utterance.contains("推荐")
+                    || utterance.contains("想买") || utterance.contains("换")
+                    || utterance.contains("再来"));
+    }
+
+    private EmotionResult handleOrderStatus(String sessionId, Long userId, SessionStateEntity state) {
+        Optional<OrderEntity> latest = orderService.latestForSession(sessionId, userId);
+        boolean hasPending = pendingStore.get(sessionId) != null;
+        if (latest.isPresent()) {
+            OrderEntity order = latest.get();
+            if (!hasPending) state.setPhase("ENDED");
+            String status = "CANCELLED".equals(order.getStatus()) ? "订单已经取消" : "订单已经生成";
+            return new EmotionResult(String.format("刚才的%s，金额 %s 元。%s", status,
+                    order.getTotalAmount(), hasPending
+                            ? "另有一笔待确认的订单，还没有下单。" : "想再买的话，可以告诉我新的需求。"), List.of());
+        }
+        if (!hasPending) state.setPhase("RECOMMEND");
+        return new EmotionResult(hasPending ? "目前只是准备了待确认订单，还没有下单。"
+                : "当前会话还没有生成订单，可以先选一款商品。", List.of());
+    }
+
+    private IntentResult resolveIntent(String sessionId, SessionStateEntity state, String utterance) {
+        if (isCatalogQuestion(utterance)) {
+            return new IntentResult(Intent.CHITCHAT, Map.of(), 1.0);
+        }
+        if (isOrderStatusQuestion(utterance)) {
+            return new IntentResult(Intent.ORDER_CONFIRM, Map.of(), 1.0);
+        }
+        if (CommonConfirmer.isCommonConfirmer(utterance) && !CommonConfirmer.isContinuation(utterance)) {
+            return pendingStore != null && pendingStore.get(sessionId) != null
+                    ? new IntentResult(Intent.ORDER_CONFIRM, Map.of(), 1.0)
+                    : CommonConfirmer.CONFIRMER_INTENT;
+        }
+        IntentResult intent = intentService.classify(sessionId, utterance);
+        // 明确说出的品类不能因模型漏抽而沿用旧品类。
+        if (intent.intent() == Intent.PRODUCT_RECOMMENDATION || intent.intent() == Intent.CLARIFY_NEEDED
+                || intent.intent() == Intent.ORDER_CONFIRM) {
+            Map<String, Object> slots = new HashMap<>(intent.slots() == null ? Map.of() : intent.slots());
+            if (slots.get("category") == null) {
+                Matcher mentions = CATEGORY_MENTION.matcher(utterance);
+                String category = null;
+                while (mentions.find()) category = mentions.group();
+                if (category != null) {
+                    slots.put("category", "服装".equals(category) ? "衣服" : category);
+                    intent = new IntentResult(intent.intent(), slots, intent.confidence());
+                }
+            }
+        }
+        intent = reviseIntentByContext(state, intent);
+        Object category = intent.slots() == null ? null : intent.slots().get("category");
+        Object previousCategory = state.getSlots() == null ? null : state.getSlots().get("category");
+        // 购买另一品类是新的购物需求，不能确认上一轮的商品。
+        if (intent.intent() == Intent.ORDER_CONFIRM && category != null
+                && !Objects.equals(category, previousCategory)
+                && referenceResolver.resolve(state, utterance).isEmpty()) {
+            return new IntentResult(Intent.PRODUCT_RECOMMENDATION, intent.slots(), intent.confidence());
+        }
+        return intent;
+    }
+
+    private void leaveOrderConfirmationForShopping(String sessionId, SessionStateEntity state, IntentResult intent) {
+        if ("ORDER_CONFIRM".equals(state.getPhase())
+                && (intent.intent() == Intent.PRODUCT_RECOMMENDATION
+                    || intent.intent() == Intent.CLARIFY_NEEDED || intent.intent() == Intent.PRODUCT_COMPARE)) {
+            // 只移除临时预览，不影响已写入的订单。
+            orderService.cancel(sessionId);
+            state.setPhase("RECOMMEND");
+            state.setPendingAsk(null);
+        }
     }
 
     private EmotionResult handleChitchat(String sessionId, Long userId, String utterance) {
         // 闲聊走 EmotionService 的闲聊模式（EmotionAgent 内部可判断 products 为空）
         return emotionService.wrap(sessionId, utterance, "",
                 new RecommendResult(List.of(), "chitchat"));
+    }
+
+    private boolean isCatalogQuestion(String utterance) {
+        return utterance != null && utterance.matches(
+                ".*(?:这里|这儿|店里|你们|你这边).*(?:都有什么|有什么商品|卖什么|有哪些商品|有什么卖).*"
+                        + "|.*(?:有什么商品|有哪些商品|卖些什么).*");
+    }
+
+    private EmotionResult handleCatalog(String sessionId, SessionStateEntity state) {
+        if (pendingStore != null && pendingStore.get(sessionId) != null) orderService.cancel(sessionId);
+        state.setSlots(new HashMap<>());
+        state.setLastRecommendations(List.of());
+        state.setPendingAsk(null);
+        state.setPhase("INTENT");
+        List<String> categories = recommendService.availableCategories(sessionId);
+        return new EmotionResult(categories.isEmpty() ? "当前范围内没有有库存的在售商品。"
+                : "目前有" + String.join("、", categories) + "。你想先看哪一类？", List.of());
+    }
+
+    private EmotionResult emptyRecommendation(SessionStateEntity state, Map<String, Object> slots) {
+        state.setPhase("CLARIFY");
+        String category = Objects.toString(slots.get("category"), "商品");
+        Object budget = slots.get("budget");
+        if (budget instanceof Number) {
+            state.setPendingAsk("budget");
+            return new EmotionResult("没有找到符合当前条件、" + budget + "元以内的" + category
+                    + "。如果想调整预算，新的预算上限是多少元？", List.of());
+        }
+        state.setPendingAsk("category");
+        return new EmotionResult("没有找到符合当前条件的" + category + "。想换个品类或调整用途吗？", List.of());
     }
 
     private EmotionResult handleOutOfScope(String sessionId, String utterance) {
@@ -337,11 +471,11 @@ public class OrchestratorService {
     public Flux<StreamChunk> streamHandle(String sessionId, Long userId, String utterance) {
         sessionService.openIfAbsent(sessionId, userId, "HOME_ENTRY");
         SessionStateEntity state = stateService.load(sessionId);
-        IntentResult intent = reviseIntentByContext(state, intentService.classify(sessionId, utterance));
+        IntentResult intent = resolveIntent(sessionId, state, utterance);
         log.info("[Stream] sessionId={} intent={} slots={}",
                 sessionId, intent.intent(), intent.slots());
 
-        if (intent.intent() != Intent.PRODUCT_RECOMMENDATION || "ORDER_CONFIRM".equals(state.getPhase())) {
+        if (intent.intent() != Intent.PRODUCT_RECOMMENDATION) {
             EmotionResult r = handle(sessionId, userId, utterance);
             Flux<StreamChunk> products = r.displayBlocks() == null || r.displayBlocks().isEmpty()
                     ? Flux.empty() : Flux.just(StreamChunk.products(r.displayBlocks()));
@@ -351,6 +485,8 @@ public class OrchestratorService {
                     ttsAudio(r.speechText()).map(StreamChunk::audio)
             );
         }
+
+        leaveOrderConfirmationForShopping(sessionId, state, intent);
 
         Map<String, Object> slots = new HashMap<>();
         if (state.getSlots() != null) slots.putAll(state.getSlots());
@@ -364,9 +500,20 @@ public class OrchestratorService {
         state.setPhase("RECOMMEND");
         state.setPendingAsk(null);
         state.setLastRecommendations(rec.items().stream().map(RecommendedItem::productId).toList());
+        EmotionResult emptyReply = rec.items().isEmpty() ? emptyRecommendation(state, slots) : null;
         stateService.save(state);
         log.info("[Stream-Rec] sessionId={} slotsForRecommend={} recCount={}",
                 sessionId, slots, rec.items().size());
+
+        if (emptyReply != null) {
+            EmotionResult reply = compliance.ensureCompliant(sessionId, userId, emptyReply);
+            String summary = turnSummarizer.summarize(utterance, intent.intent(), reply.speechText());
+            memory.append(sessionId, new ShortTermMemory.Turn(
+                    "TURN", intent.intent().name(), summary, System.currentTimeMillis()));
+            return Flux.concat(Flux.just(StreamChunk.products(List.of())),
+                    Flux.just(StreamChunk.text(reply.speechText())),
+                    ttsAudio(reply.speechText()).map(StreamChunk::audio));
+        }
 
         // 先把商品卡片发下去（用户立刻看到 UI）
         Flux<StreamChunk> productsFlow = Flux.just(StreamChunk.products(rec.items()));
