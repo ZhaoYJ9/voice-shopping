@@ -20,6 +20,10 @@ public class ParallelRecommendService {
     private final RecommendReasonService reasonService;
     private final SessionScopeCache scopeCache;      // 新增
 
+    public List<String> availableCategories(String sessionId) {
+        return candidates.availableCategories(scopeCache.get(sessionId));
+    }
+
     public RecommendResult recommend(String sessionId, Long userId,
                                      String utterance, Map<String, Object> slots) {
 
