@@ -116,11 +116,7 @@ public class OrchestratorService {
                                                SessionStateEntity state,
                                                String utterance, IntentResult intent) {
         // 合并历史槽位 + 本轮新槽位
-        Map<String, Object> slots = new HashMap<>();
-        if (state.getSlots() != null) slots.putAll(state.getSlots());
-        intent.slots().forEach((k, v) -> {
-            if (v != null) slots.put(k, v);
-        });
+        Map<String, Object> slots = recommendationSlots(state, intent, utterance);
 
         state.setSlots(slots);
         state.setCurrentIntent("PRODUCT_RECOMMENDATION");
@@ -155,6 +151,11 @@ public class OrchestratorService {
 
     private EmotionResult handleClarify(String sessionId, SessionStateEntity state,
                                         String utterance, IntentResult intent) {
+        if (BudgetUtterance.isIncomplete(utterance)) {
+            state.setPhase("CLARIFY");
+            state.setPendingAsk("budget");
+            return new EmotionResult("新的预算上限是多少元？", List.of());
+        }
         if (intent.slots() != null && Boolean.TRUE.equals(intent.slots().get("confirmer"))) {
             // 对“可以”的指向不作猜测，也不把旧预算悄悄改成无限制。
             if ("budget".equals(state.getPendingAsk())) {
@@ -187,19 +188,16 @@ public class OrchestratorService {
                                         SessionStateEntity state,
                                         String utterance, IntentResult intent) {
         // 对比类 = 在上一次推荐结果基础上，根据当前诉求重新排序/过滤
-        Map<String, Object> slots = new HashMap<>();
-        if (state.getSlots() != null) slots.putAll(state.getSlots());
-        intent.slots().forEach((k, v) -> {
-            if (v != null) slots.put(k, v);
-        });
+        Map<String, Object> slots = recommendationSlots(state, intent, utterance);
 
         // "便宜点/贵点"要以**上一轮推荐的实际价格**为锚，不能直接用 budget——
         // budget 只是用户给的上限，上一轮推出来的商品可能远低于 budget，
         // 若直接按 budget * 0.8 下调，新上限可能还比上一轮最高价高，起不到"便宜"的效果。
-        String pd = intent.slots() == null ? null : (String) intent.slots().get("priceDirection");
+        boolean explicitBudget = hasExplicitBudget(intent, utterance);
+        String pd = (String) slots.get("priceDirection");
         List<Long> lastIds = state.getLastRecommendations();
         // 介绍/对比上一轮商品时保留原商品及顺序，不重新检索出另一批。
-        if (pd == null && lastIds != null && !lastIds.isEmpty()
+        if (!explicitBudget && pd == null && lastIds != null && !lastIds.isEmpty()
                 && (utterance.contains("介绍") || utterance.contains("对比")
                 || utterance.contains("比较") || utterance.contains("这三款")
                 || utterance.contains("这几款") || utterance.contains("哪个好"))) {
@@ -236,6 +234,8 @@ public class OrchestratorService {
         state.setSlots(slots);
         state.setPhase("RECOMMEND");
         state.setLastRecommendations(rec.items().stream().map(RecommendedItem::productId).toList());
+        log.info("[Compare-Rec] sessionId={} slotsForRecommend={} recCount={}",
+                sessionId, slots, rec.items().size());
         if (rec.items().isEmpty()) return emptyRecommendation(state, slots);
         state.setPendingAsk(null);
         String userNeeds = formatUserNeeds(slots);
@@ -333,7 +333,22 @@ public class OrchestratorService {
                     ? new IntentResult(Intent.ORDER_CONFIRM, Map.of(), 1.0)
                     : CommonConfirmer.CONFIRMER_INTENT;
         }
+        // ASR 可能把“预算调整到”和金额分成两条 final，不能拿旧预算补全前半句。
+        if (BudgetUtterance.isIncomplete(utterance)) {
+            return new IntentResult(Intent.CLARIFY_NEEDED, Map.of(), 1.0);
+        }
         IntentResult intent = intentService.classify(sessionId, utterance);
+        // “七佰”等 ASR 数字变体可能让模型漏抽金额，不能因此回退到旧预算。
+        Optional<BudgetUtterance.Budget> explicitBudget = BudgetUtterance.explicitBudget(utterance);
+        if (explicitBudget.isPresent() && (intent.intent() == Intent.PRODUCT_RECOMMENDATION
+                || intent.intent() == Intent.PRODUCT_COMPARE || intent.intent() == Intent.CLARIFY_NEEDED)) {
+            Map<String, Object> slots = new HashMap<>(intent.slots() == null ? Map.of() : intent.slots());
+            slots.put("budget", explicitBudget.get().maximum());
+            if (explicitBudget.get().minimum() != null) slots.put("budgetMin", explicitBudget.get().minimum());
+            else slots.remove("budgetMin");
+            slots.remove("priceDirection");
+            intent = new IntentResult(intent.intent(), slots, intent.confidence());
+        }
         // 明确说出的品类不能因模型漏抽而沿用旧品类。
         if (intent.intent() == Intent.PRODUCT_RECOMMENDATION || intent.intent() == Intent.CLARIFY_NEEDED
                 || intent.intent() == Intent.ORDER_CONFIRM) {
@@ -348,7 +363,7 @@ public class OrchestratorService {
                 }
             }
         }
-        intent = reviseIntentByContext(state, intent);
+        intent = reviseIntentByContext(state, intent, utterance);
         Object category = intent.slots() == null ? null : intent.slots().get("category");
         Object previousCategory = state.getSlots() == null ? null : state.getSlots().get("category");
         // 购买另一品类是新的购物需求，不能确认上一轮的商品。
@@ -400,7 +415,9 @@ public class OrchestratorService {
         Object budget = slots.get("budget");
         if (budget instanceof Number) {
             state.setPendingAsk("budget");
-            return new EmotionResult("没有找到符合当前条件、" + budget + "元以内的" + category
+            String range = slots.get("budgetMin") instanceof Number minimum
+                    ? minimum + "到" + budget + "元之间" : budget + "元以内";
+            return new EmotionResult("没有找到符合当前条件、" + range + "的" + category
                     + "。如果想调整预算，新的预算上限是多少元？", List.of());
         }
         state.setPendingAsk("category");
@@ -423,8 +440,17 @@ public class OrchestratorService {
      * 2) 信息已足：state.slots + 本轮 slots 合并后，category + (budget|scenario|brand)
      * 任一组合齐全，就不该再 CLARIFY_NEEDED，强制改写为 PRODUCT_RECOMMENDATION
      */
-    private IntentResult reviseIntentByContext(SessionStateEntity state, IntentResult intent) {
+    private IntentResult reviseIntentByContext(SessionStateEntity state, IntentResult intent, String utterance) {
         Map<String, Object> curSlots = intent.slots() == null ? Map.of() : intent.slots();
+
+        // 明确金额/区间是一次新的检索，直接走流式推荐，不能被“贵了”带回整段对比回复。
+        boolean hasCategory = curSlots.get("category") != null
+                || (state.getSlots() != null && state.getSlots().get("category") != null);
+        if (hasCategory && hasExplicitBudget(intent, utterance)
+                && (intent.intent() == Intent.PRODUCT_RECOMMENDATION
+                || intent.intent() == Intent.PRODUCT_COMPARE || intent.intent() == Intent.CLARIFY_NEEDED)) {
+            return new IntentResult(Intent.PRODUCT_RECOMMENDATION, curSlots, intent.confidence());
+        }
 
         // ① 上下文价格对比
         boolean hasLastRecommend = "RECOMMEND".equals(state.getPhase())
@@ -441,23 +467,48 @@ public class OrchestratorService {
 
         // ② 信息已足阈值：合并历史 slots + 本轮 slots
         if (intent.intent() == Intent.CLARIFY_NEEDED) {
-            Map<String, Object> merged = new HashMap<>();
-            if (state.getSlots() != null) merged.putAll(state.getSlots());
-            curSlots.forEach((k, v) -> {
-                if (v != null) merged.put(k, v);
-            });
+            Map<String, Object> merged = recommendationSlots(state, intent, utterance);
 
-            boolean hasCategory = merged.get("category") != null;
+            boolean hasMergedCategory = merged.get("category") != null;
             boolean hasAnyAnchor = merged.get("budget") != null
                     || merged.get("scenario") != null
                     || merged.get("brand") != null;
-            if (hasCategory && hasAnyAnchor) {
+            if (hasMergedCategory && hasAnyAnchor) {
                 log.info("[Orc] 意图矫正 CLARIFY_NEEDED -> PRODUCT_RECOMMENDATION, mergedSlots={}", merged);
                 return new IntentResult(Intent.PRODUCT_RECOMMENDATION, merged, intent.confidence());
             }
         }
 
         return intent;
+    }
+
+    private static boolean hasExplicitBudget(IntentResult intent, String utterance) {
+        return intent.slots() != null && intent.slots().get("budget") instanceof Number
+                && BudgetUtterance.hasExplicitAmount(utterance);
+    }
+
+    private static Map<String, Object> recommendationSlots(SessionStateEntity state,
+                                                           IntentResult intent, String utterance) {
+        Map<String, Object> slots = new HashMap<>();
+        if (state.getSlots() != null) slots.putAll(state.getSlots());
+        // 比较产生的下限和排除列表只用于当轮，不能永久污染后续检索。
+        slots.remove("priceDirection");
+        slots.remove("priceMin");
+        slots.remove("excludeProductIds");
+        if (intent.slots() != null) intent.slots().forEach((k, v) -> {
+            if (v != null) slots.put(k, v);
+        });
+        if (hasExplicitBudget(intent, utterance)) {
+            // “700 元”比模型推断的“更便宜”优先；允许重推仍符合新预算的商品。
+            slots.remove("priceDirection");
+            slots.remove("priceMin");
+            slots.remove("excludeProductIds");
+            // 用户给出的区间下限是持久偏好，只有新预算才能替换或清除。
+            Number minimum = BudgetUtterance.explicitBudget(utterance).orElseThrow().minimum();
+            if (minimum != null) slots.put("budgetMin", minimum);
+            else slots.remove("budgetMin");
+        }
+        return slots;
     }
 
     private static String formatUserNeeds(Map<String, Object> slots) {
@@ -488,11 +539,7 @@ public class OrchestratorService {
 
         leaveOrderConfirmationForShopping(sessionId, state, intent);
 
-        Map<String, Object> slots = new HashMap<>();
-        if (state.getSlots() != null) slots.putAll(state.getSlots());
-        if (intent.slots() != null) intent.slots().forEach((k, v) -> {
-            if (v != null) slots.put(k, v);
-        });
+        Map<String, Object> slots = recommendationSlots(state, intent, utterance);
         eventPublisher.publishUserSpoken(sessionId, userId, utterance);
         RecommendResult rec = recommendService.recommend(sessionId, userId, utterance, slots);
         state.setSlots(slots);
