@@ -18,6 +18,15 @@ public class RecommendCandidatesService {
     private final ProductRepository repo;
     private final ScopeFilterBuilder scopeFilterBuilder; // 新增
 
+    public List<String> availableCategories(SessionScope scope) {
+        return repo.findByStatus("ON_SALE").stream()
+                .filter(p -> p.getStock() != null && p.getStock() > 0)
+                .filter(p -> scope == null || scope.isPlatformWide()
+                        || scope.allowedMerchantIds().contains(p.getMerchantId()))
+                .map(ProductEntity::getCategoryL2)
+                .filter(Objects::nonNull).distinct().sorted().toList();
+    }
+
     public List<RecommendedItem> fetchCandidates(String query, Map<String, Object> slots,
                                                  SessionScope scope, int topN) {
         SqlFilterBuilder.Filter f = SqlFilterBuilder.fromSlots(slots);
