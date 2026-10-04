@@ -13,7 +13,8 @@ import java.util.regex.Pattern;
 @RequiredArgsConstructor
 public class OrderReferenceResolver {
 
-    private static final Pattern ORDINAL = Pattern.compile("第?([一二三四五1-5])款?");
+    private static final Pattern ORDINAL =
+            Pattern.compile("第([一二三四五1-5])(?![零一二三四五六七八九十百千万0-9])款?");
 
     /**
      * 尝试从用户话里抽取想下单的商品 id。
@@ -33,7 +34,7 @@ public class OrderReferenceResolver {
         }
 
         // 2. 就/要/选 + 开头 / 最后 / 中间
-        if (utterance.contains("第一") || utterance.contains("开头")) return Optional.of(last.get(0));
+        if (utterance.contains("开头")) return Optional.of(last.get(0));
         if (utterance.contains("最后") || utterance.contains("最后那")) return Optional.of(last.get(last.size() - 1));
         if (utterance.contains("中间")) return Optional.of(last.get(last.size() / 2));
 
