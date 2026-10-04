@@ -5,6 +5,7 @@ import com.zhaoyijin.voiceshopping.agent.AgentFactory;
 import com.zhaoyijin.voiceshopping.dto.RecommendResult;
 import io.agentscope.core.ReActAgent;
 import io.agentscope.core.agent.EventType;
+import io.agentscope.core.agent.StreamOptions;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
 import lombok.RequiredArgsConstructor;
@@ -36,28 +37,18 @@ public class EmotionStreamingService {
                     .role(MsgRole.USER)
                     .textContent(mapper.writeValueAsString(input))
                     .build();
-            return agent.stream(userMsg)
-                    // 只要 LLM 的 token 流，工具调用之类的事件不进 TTS 通道
-                    .filter(e -> e.getType() == EventType.REASONING)
+            // 增量片段与结束时的完整结果是两类事件，完整结果不能再次送入字幕/TTS。
+            StreamOptions options = StreamOptions.builder()
+                    .eventTypes(EventType.REASONING)
+                    .incremental(true)
+                    .includeReasoningChunk(true)
+                    .includeReasoningResult(false)
+                    .build();
+            return agent.stream(userMsg, options)
+                    .filter(e -> e.getType() == EventType.REASONING && !e.isLast())
                     .map(e -> e.getMessage().getTextContent())
-                    // ReActAgent 在 reasoning 跑完后会把"完整 message"再吐一次，
-                    // 表现为流末尾出现一段长 chunk 包含全文（甚至带 JSON 外壳的旧版回放）。
-                    // 这里做一道去重：只接受 delta（与已积累内容不重叠的新片段）。
-                    .scan(new String[]{"", ""}, (state, cur) -> {
-                        String acc = state[1];
-                        if (cur == null || cur.isEmpty() || cur.equals(acc) || acc.endsWith(cur)) {
-                            return new String[]{"", acc};
-                        }
-                        // 模型若一次性返回完整版（cur 已包含了 acc），算出 delta 部分
-                        if (!acc.isEmpty() && cur.startsWith(acc)) {
-                            return new String[]{cur.substring(acc.length()), cur};
-                        }
-                        // 正常 delta：直接追加
-                        return new String[]{cur, acc + cur};
-                    })
-                    .skip(1)
-                    .map(s -> s[0])
-                    .filter(s -> !s.isEmpty());
+                    // 相同的相邻增量也可能是正常叠词，不再按内容猜测去重。
+                    .filter(text -> text != null && !text.isEmpty());
         } catch (Exception e) {
             return Flux.error(e);
         }
