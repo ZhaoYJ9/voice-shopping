@@ -32,7 +32,8 @@ public class IntentService {
         // -1) 极短确认词直接走进程内常量，连 Redis 都省了
         if (CommonConfirmer.isCommonConfirmer(utterance)) {
             log.debug("[Intent] 命中 confirmer 短路 sessionId={} utterance={}", sessionId, utterance);
-            return CommonConfirmer.CONFIRMER_INTENT;
+            return CommonConfirmer.isContinuation(utterance)
+                    ? CommonConfirmer.CONTINUE_INTENT : CommonConfirmer.CONFIRMER_INTENT;
         }
 
         // 0) 先查缓存——5 分钟内同一会话说同样的话，跳过 LLM
