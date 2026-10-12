@@ -5,8 +5,11 @@ import com.zhaoyijin.voiceshopping.repository.SessionRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
+import org.springframework.http.HttpStatus;
 
 import java.time.LocalDateTime;
+import java.util.Objects;
 
 @Service
 @RequiredArgsConstructor
@@ -16,7 +19,12 @@ public class SessionService {
 
     @Transactional
     public SessionEntity openIfAbsent(String sessionId, Long userId, String channel) {
-        return repo.findById(sessionId).orElseGet(() -> {
+        return repo.findById(sessionId).map(existing -> {
+            if (!Objects.equals(existing.getUserId(), userId)) {
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN, "无权访问此会话");
+            }
+            return existing;
+        }).orElseGet(() -> {
             SessionEntity s = new SessionEntity();
             s.setId(sessionId);
             s.setUserId(userId);
