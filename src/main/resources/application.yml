@@ -36,6 +36,8 @@ agentscope:
 
 # 项目自定义配置
 voice-shopping:
+  websocket:
+    allowed-origins: ${VOICE_SHOPPING_ALLOWED_ORIGINS:}
   llm:
     main-model: qwen-max            # 主对话模型
     light-model: qwen-turbo         # 意图/情感等轻量任务
