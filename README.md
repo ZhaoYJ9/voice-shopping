@@ -32,7 +32,7 @@
 | --- | --- |
 | 语音交互 | 浏览器录音，经 WebSocket 发送音频，接收 ASR 结果、商品卡片、字幕和 TTS 音频 |
 | 意图识别与槽位提取 | 识别推荐、比较、确认订单等意图，提取品类、预算、用途等条件 |
-| 多轮澄清 | 信息不足时追问，并将后续回答合并到当前会话条件中 |
+| 多轮澄清 | 提供澄清分支与需求条件合并；页面是否进入追问取决于意图识别与业务路由 |
 | 需求更新 | 支持修改预算、预算区间和品类，处理新需求与历史条件之间的关系 |
 | 商品推荐 | 结合语义检索、条件筛选和用户画像重排序，返回候选商品 |
 | 上下文比较 | 基于上一轮推荐处理商品比较及“便宜一点”“贵一点”等调整 |
@@ -40,7 +40,7 @@
 | 演示订单 | 支持订单预览、确认、取消待确认订单及当前会话订单状态查询 |
 | 目录查询 | 根据当前商品目录回答可选品类 |
 | 情绪化回复与闲聊 | 根据用户表达调整回复方式，并处理简单闲聊 |
-| 多视角点评 | 由价格顾问、专业跑者、入门买家对候选商品提供不同侧重的点评 |
+| 多视角点评 | 已实现价格顾问、专业跑者、入门买家协作，接入同步推荐分支；页面的流式推荐分支尚未调用 |
 | 会话与用户记忆 | 保存近期对话、需求条件、推荐列表，并提供用户偏好回流机制 |
 
 
@@ -51,7 +51,7 @@
 | --- | --- |
 | 后端 | Java 21、Spring Boot 4.0.5 |
 | Agent 构建与协作 | AgentScope Java 1.0.11、Spring AI Alibaba AgentScope Starter |
-| 大语言模型 | DashScope：`qwen-max`、`qwen-turbo` |
+| 大语言模型 | DashScope：主模型 `qwen-max`、轻量模型 `qwen-turbo`；多视角团队使用 `qwen-plus` |
 | 语音识别 | DashScope：`paraformer-realtime-v2` |
 | 语音合成 | DashScope：`cosyvoice-v1`，默认音色 `longwan` |
 | 文本向量 | DashScope：`text-embedding-v3`，数据库向量列为 1024 维 |
@@ -73,11 +73,13 @@ flowchart TD
     Intent --> Order[订单预览与确认]
     Recommend --> Retrieve[向量检索与条件筛选]
     Retrieve --> Rerank[用户画像重排序]
-    Rerank --> Reason[推荐理由与多视角点评]
+    Rerank --> Reason[推荐理由生成]
+    Reason -. 同步推荐分支按配置调用 .-> Perspective[多视角点评]
     Orchestrator <--> Redis[(Redis 短期记忆与缓存)]
     Retrieve --> PG[(PostgreSQL / pgvector)]
     Order --> PG
     Reason --> Response[回复生成与流式字幕]
+    Perspective -. 点评作为同步回复上下文 .-> Response
     Clarify --> Response
     Order --> Response
     Response --> TTS[TTS 流式语音合成]
@@ -88,23 +90,25 @@ flowchart TD
 
 `OrchestratorService` 根据识别出的意图选择业务分支，再结合会话状态、商品检索、订单服务和回复生成完成处理。Agent 负责理解与生成，筛选条件、商品引用和订单状态由业务代码管理。
 
+语音页面调用 `streamHandle()`：推荐意图直接检索商品并生成流式回复，其他意图转入 `handle()` 的同步业务分支，再返回文本与 TTS。同步推荐分支包含必填条件检查与多视角点评；流式推荐分支目前未接入这两步。因此，页面不会对每次推荐都执行完整的必填条件追问，也不会自动调用点评团队。
+
 ### 多智能体分工
 
 | Agent / 团队 | 职责 |
 | --- | --- |
 | IntentAgent | 识别当前意图并提取需求槽位 |
-| ClarifyAgent | 判断需要补充的信息并生成追问 |
+| ClarifyAgent | 根据 `ClarifyRuleService` 找出的缺失字段生成追问 |
 | RecommendAgent | 为候选商品生成推荐理由 |
 | EmotionAgent | 根据用户情绪和业务结果调整回复 |
-| PerspectiveTeam | 通过价格顾问、专业跑者、入门买家三个视角点评候选商品 |
+| PerspectiveTeam | 在同步推荐分支启用时，通过价格顾问、专业跑者、入门买家三个视角点评候选商品 |
 
 ### 记忆与会话状态
 
-- **短期记忆**：`ShortTermMemory` 在 Redis 中保存近期对话记录或摘要，默认 TTL 为 30 分钟，历史保留配置为 10。
+- **短期记忆**：主链路将每轮对话摘要以 `TURN` 记录写入 Redis，默认保留最近 10 条摘要，写入时刷新 30 分钟 TTL；意图识别读取最近 3 条摘要。
 - **业务状态**：`SessionStateService` 管理当前意图、已填槽位、待追问信息及上一轮推荐列表，用于连续对话与商品引用。
-- **用户画像**：静态画像保存年龄、城市等属性，动态画像保存品类/品牌偏好、近期浏览与购买等信息，供推荐排序使用。
-- **长期记忆回流**：`LongTermMemoryWriter` 提供在会话结束或订单确认等时机异步更新部分用户偏好的机制。
-- **Agent 记忆控制**：`AgentMemoryPolicy` 对不同 Agent 使用清空或裁剪策略，控制历史上下文规模。
+- **用户画像**：数据库与 DTO 保存静态属性、品类/品牌偏好及近期浏览/购买等字段。当前重排序主要结合预算、平均订单金额、价格敏感度和近期购买记录；品牌加分还依赖候选商品的 `attributes.brand`，演示数据的品牌主要保存在独立 `brand` 列中，因此不能认为所有画像字段均已生效。
+- **长期记忆回流**：订单确认、语音连接关闭等时机会调用异步回流，当前主要累加品类偏好。价格敏感度统计仍筛选 `USER` 记录，与主链路的 `TURN` 摘要格式不一致，不能描述为已完成价格偏好自动学习。
+- **Agent 记忆控制**：意图 Agent 在调用前清空自身记忆，推荐理由 Agent 在调用前裁剪至最近 8 条消息；情感 Agent 的按轮裁剪方法未被回复服务调用，但 `AgentMemoryGuard` 每分钟检查一次，超过 40 条消息时清空其全部内部记忆。这与始终保留最近 20 轮的策略不同。
 
 ### 推荐引擎
 
@@ -114,15 +118,26 @@ flowchart TD
 2. 将预算、品类、商品属性和商家范围等条件合并到筛选逻辑中。
 3. 读取候选商品详情，并再次应用商家范围约束。
 4. 通过 `ProfileReranker` 结合用户画像与当前需求调整排序。
-5. 取前三款商品，生成推荐理由，并按配置加入多视角点评。
+5. 取至多三款商品，生成推荐理由。同步推荐分支按配置加入多视角点评；页面的流式推荐分支直接进入流式回复生成。
+
+商家范围通过会话接口建立；当前语音演示页面不调用该接口，缺少范围配置时按全平台检索。
 
 ### 流式语音处理
 
 - 浏览器将录音转换为 16 kHz、16-bit、单声道 PCM，通过 WebSocket 分块上传。
 - ASR 返回识别文本，最终识别结果进入业务处理；预算表述被拆成多段时，入口提供拼接处理。
 - 同一连接中的回复按轮次排队，上一轮处理及 TTS 完成后开始下一轮。
+- 推荐回复按句子聚合后发送字幕并合成音频；澄清、比较、订单等同步业务分支先生成完整文本，再发送字幕与 TTS。
 - 后端分别发送商品数据、字幕和音频，页面显示商品卡片并播放 TTS。
 - `turn_start`、`turn_done` 和 `done` 区分单轮回复与整次输入的完成状态。
+
+### 语音连接鉴权
+
+- 页面将已有登录 Token 通过 `Sec-WebSocket-Protocol` 请求头发送，URL 仅携带客户端生成的会话 UUID。
+- 客户端同时提供 `voice.v1` 与 `Bearer-<token>`；后端校验 Sa-Token 登录态后，只协商 `voice.v1`，不将 Token 回写到响应头。
+- 用户 ID 来自校验后的 Token，客户端传入的 `userId` 不作为身份依据；服务端将用户 ID 与会话 UUID 组合，隔离不同用户的语音会话。
+- 缺失或失效的 Token 会拒绝握手；异常凭据与会话参数也会被拒绝。会话服务进一步检查已有会话的所属用户。
+- 默认按同源策略接入页面。通过 HTTPS 代理转发到 HTTP 后端时，使用 `VOICE_SHOPPING_ALLOWED_ORIGINS` 显式配置外部页面的 Origin，例如 `https://shop.example`；多个来源以逗号分隔，不支持通配符或路径。远程访问使用 HTTPS/WSS，Token 校验发生在每次建立连接时。
 
 ## 快速开始
 
@@ -161,7 +176,7 @@ psql -v ON_ERROR_STOP=1 -d zyj_voice_shopping -f src/main/resources/sql/schema.s
 psql -v ON_ERROR_STOP=1 -d zyj_voice_shopping -f src/main/resources/sql/data.sql
 ```
 
-**`data.sql` 含有 `TRUNCATE TABLE ... CASCADE`，会清空相关表，只应在专用演示数据库中执行。** 页面默认使用 `userId=1`，需要数据库中存在该用户；脚本已提供对应演示记录。
+**`data.sql` 含有 `TRUNCATE TABLE ... CASCADE`，会清空相关表，只应在专用演示数据库中执行。** 登录用户需要在数据库中存在，脚本已提供 `alice`、`bob` 等演示用户。
 
 ### 4. 配置环境变量
 
@@ -190,6 +205,8 @@ java -jar target/zyj-voice-shopping-1.0-SNAPSHOT.jar
 
 上述命令用于打包运行，跳过测试；测试命令见下文。
 
+应用启动时还会调用 TTS 服务预热短语缓存，需要可用的 DashScope API Key 与网络连接。
+
 ### 6. 生成商品向量
 
 导入演示数据后，调用向量重建接口为商品生成 Embedding：
@@ -204,7 +221,21 @@ curl -X POST http://localhost:8080/api/v1/admin/reindex
 
 访问 [http://localhost:8080/voice-test.html](http://localhost:8080/voice-test.html)，允许麦克风权限。
 
+先在页面的“访问令牌”输入框填入登录后获得的 Token。令牌仅保留在当前页面内存中，不写入 URL 或浏览器持久化存储。
+
+在可信的本地演示环境，可通过现有演示登录接口取得 Token：
+
+```bash
+curl -X POST http://localhost:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"alice"}'
+```
+
+将响应中的 `token` 值填入页面。**这个登录接口目前仅按用户名发放 Token，不校验密码，不能作为生产身份认证。** 本次语音鉴权只校验已有 Token，正式账号密码登录需另行完善。
+
 点击“开始录音”，说一句完整需求，再点击停止，等待商品卡片、字幕和语音回复。本地通过 `localhost` 访问；远程演示需要配置 HTTPS/WSS，反向代理需支持 WebSocket。
+
+如果使用 HTTPS 反向代理，在后端启动环境中增加 `VOICE_SHOPPING_ALLOWED_ORIGINS=https://你的前端域名`（填写实际域名，不带路径），并确保代理转发 `Sec-WebSocket-Protocol` 请求头。握手响应只返回 `voice.v1`；不要在代理访问日志中记录携带 Token 的协议请求头。
 
 ## 测试
 
@@ -232,8 +263,10 @@ node --test src/test/js/*.test.cjs
 | `BudgetUtteranceTest`、`SqlFilterBuilderTest` | 预算表达解析与筛选条件 |
 | `OrderReferenceResolverTest`、`OrchestratorOrderStateTest` | 商品引用、订单确认和状态处理 |
 | `VoiceWebSocketHandlerTest` | 语音入口、回复排队与状态通知 |
+| `AuthHandshakeInterceptorTest`、`VoiceProtocolNegotiationTest`、`SessionServiceTest` | Token 握手校验、协议协商与会话所属用户检查 |
 | `TtsServiceTest`、`EmotionStreamingServiceTest` | 流式回复、合成完成与取消处理 |
 | `voice-test-response.test.cjs`、`voice-test-stop.test.cjs` | 页面回复状态、字幕保留与停止录音处理 |
+| `voice-test-auth.test.cjs` | 页面令牌传输、会话重连及连接失败处理 |
 
 这些测试用于验证代码逻辑。真实麦克风、DashScope 调用、网络传输和音频播放仍需单独进行端到端验证。
 
@@ -241,7 +274,9 @@ node --test src/test/js/*.test.cjs
 
 - 项目面向学习与功能演示，尚未完成生产环境和多用户容量验证。
 - 订单确认会扣减库存并写入状态为 `PAID` 的演示订单，但没有调用支付服务，也没有真实配送能力。
-- 语音页面默认使用固定演示用户，并通过 URL 传递用户与会话标识；公开部署前需要接入正式身份认证。
+- 语音握手已接入已有 Token 的校验，但登录接口仍是用户名演示入口；公开部署前需要完善真正的身份认证。当前 Token 在建立连接时校验，尚未接入长连接期间的实时失效检测。
+- 页面流式推荐尚未接入同步推荐分支的必填条件检查和多视角点评，长期记忆与情感记忆裁剪也存在上述接入限制。
+- `ComplianceChecker` 已接入同步业务回复与流式空结果回复；成功的流式推荐文本目前直接进入字幕与 TTS，尚未经过该检查，不能宣称所有语音输出都已接受统一内容过滤。
 - 当前页面包含开发日志，部署时应根据场景整理调试界面和调试接口。
 - 语音识别、模型回复和检索结果受输入、数据及外部服务影响；本文不承诺固定延迟、准确率或并发量。
 
