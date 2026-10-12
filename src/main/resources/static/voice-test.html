@@ -14,6 +14,11 @@
         .card { background: #fff; border-radius: 12px; padding: 24px; margin-bottom: 16px;
             box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
         .controls { display: flex; align-items: center; gap: 16px; }
+        .auth { margin-bottom: 18px; }
+        .auth label { display: block; margin-bottom: 8px; font-weight: 600; }
+        .auth input { width: 100%; padding: 10px 12px; border: 1px solid #d1d5db;
+            border-radius: 8px; font: inherit; }
+        .auth small { display: block; margin-top: 8px; color: #6b7280; }
         #mic { font-size: 16px; font-weight: 600; padding: 12px 28px; border-radius: 8px;
             border: none; cursor: pointer; transition: all .15s; min-width: 140px; }
         #mic.idle       { background: #2563eb; color: #fff; }
@@ -55,6 +60,12 @@
 <p class="desc">点击"开始录音"讲一句话（≥ 1 秒），再点一次停止。然后看商品卡片 + 实时字幕 + 听 TTS 流式回放。</p>
 
 <div class="card">
+    <div class="auth">
+        <label for="voice-token">访问令牌</label>
+        <input id="voice-token" type="password" placeholder="填入登录后获取的 Token"
+               autocomplete="off" spellcheck="false" maxlength="512">
+        <small>令牌仅用于当前页面连接，不会保存。失效后请重新登录获取。</small>
+    </div>
     <div class="controls">
         <button id="mic" class="idle" disabled>初始化中…</button>
         <div class="status">
@@ -74,12 +85,9 @@
 
 <script>
     // ========== 配置 ==========
-    // 调试用：URL 里直接挂 userId / sessionId，让 VoiceHandshakeInterceptor 解出来塞进 session.attributes。
-    // 生产里走 19 节的 AuthHandshakeInterceptor + Sa-Token，不要明文传 userId。
-    const DEMO_USER_ID = 1;                          // ⚠️ app_user 表里必须存在这条记录，否则 FK 会报错
-    const DEMO_SESSION_ID = `voice-${Date.now()}`;   // 随机会话 id
-    const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`
-        + `/ws/voice?userId=${DEMO_USER_ID}&sessionId=${DEMO_SESSION_ID}`;
+    const VOICE_PROTOCOL = 'voice.v1';
+    let clientSessionId = null;
+    let sessionToken = null;
     const TARGET_RATE = 16000;
     const CHUNK_MS = 100;
     const MIN_RECORD_MS = 800;
@@ -94,6 +102,7 @@
 
     // ========== DOM ==========
     const $mic = document.getElementById('mic');
+    const $token = document.getElementById('voice-token');
     const $dot = document.getElementById('dot');
     const $stateText = document.getElementById('stateText');
     const $meter = document.getElementById('meterBar');
@@ -126,6 +135,7 @@
         $mic.textContent = s.text;
         $mic.className = s.cls;
         $mic.disabled = s.disabled;
+        $token.disabled = next !== State.IDLE;
         if (s.dot) $dot.classList.add(s.dot);
     }
 
@@ -194,6 +204,11 @@ registerProcessor('pcm-collector', PcmCollector);
     // ========== 开始录音 ==========
     async function start() {
         if (state !== State.IDLE) return;
+        const token = $token.value.trim();
+        if (!/^[A-Za-z0-9._~-]{1,512}$/.test(token)) {
+            log('请先填写有效的访问令牌，再开始录音。', 'warn');
+            return;
+        }
         setState(State.CONNECTING);
 
         try {
@@ -204,17 +219,24 @@ registerProcessor('pcm-collector', PcmCollector);
             $caption.textContent = '';
             $products.innerHTML = '';
 
-            ws = new WebSocket(WS_URL);
+            if (sessionToken !== token || !clientSessionId) {
+                clientSessionId = crypto.randomUUID();
+                sessionToken = token;
+            }
+            const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`
+                + `/ws/voice?sessionId=${clientSessionId}`;
+            ws = new WebSocket(url, [VOICE_PROTOCOL, `Bearer-${token}`]);
             ws.binaryType = 'arraybuffer';
             const session = ws;
             ws.onopen  = () => log('WebSocket 已连接');
-            ws.onerror = () => log('WebSocket 通信异常', 'err');
+            ws.onerror = () => log('连接失败，请检查访问令牌是否有效及服务是否可用。', 'err');
             ws.onclose = () => {
                 log('WebSocket 已关闭');
                 if (session === ws) setState(State.IDLE);
             };
             ws.onmessage = (e) => onMessage(session, e);
             await waitOpen(ws);
+            if (ws.protocol !== VOICE_PROTOCOL) throw new Error('服务未确认语音协议，请检查服务配置。');
 
             audioCtx = new AudioContext();
             log(`AudioContext 就绪，采样率 ${audioCtx.sampleRate} Hz`);
@@ -391,8 +413,19 @@ registerProcessor('pcm-collector', PcmCollector);
     function waitOpen(ws) {
         return new Promise((resolve, reject) => {
             if (ws.readyState === WebSocket.OPEN) return resolve();
-            ws.addEventListener('open',  () => resolve(), { once: true });
-            ws.addEventListener('error', () => reject(new Error('WebSocket 连接失败')), { once: true });
+            const dispose = () => {
+                ws.removeEventListener('open', opened);
+                ws.removeEventListener('error', failed);
+                ws.removeEventListener('close', failed);
+            };
+            const opened = () => { dispose(); resolve(); };
+            const failed = () => {
+                dispose(); reject(new Error('连接未建立，请检查访问令牌或重新登录。'));
+            };
+            if (ws.readyState > WebSocket.OPEN) return failed();
+            ws.addEventListener('open', opened, { once: true });
+            ws.addEventListener('error', failed, { once: true });
+            ws.addEventListener('close', failed, { once: true });
         });
     }
 
