@@ -5,6 +5,7 @@ import com.zhaoyijin.voiceshopping.entity.StreamChunk;
 import com.zhaoyijin.voiceshopping.service.LongTermMemoryWriter;
 import com.zhaoyijin.voiceshopping.service.BudgetUtterance;
 import com.zhaoyijin.voiceshopping.service.OrchestratorService;
+import com.zhaoyijin.voiceshopping.security.AuthHandshakeInterceptor;
 import com.zhaoyijin.voiceshopping.voice.AsrService;
 import io.reactivex.processors.FlowableProcessor;
 import io.reactivex.processors.PublishProcessor;
@@ -24,13 +25,14 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.util.Map;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
 @Component
 @RequiredArgsConstructor
-public class VoiceWebSocketHandler extends AbstractWebSocketHandler {
+public class VoiceWebSocketHandler extends AbstractWebSocketHandler implements SubProtocolCapable {
     private final AsrService asr;
     private final ObjectMapper mapper;
     private final OrchestratorService orchestratorService;
@@ -38,6 +40,12 @@ public class VoiceWebSocketHandler extends AbstractWebSocketHandler {
     private final AgentFactory agentFactory;
 
     private final Map<String, VoiceConnection> connections = new ConcurrentHashMap<>();
+
+    @Override
+    public List<String> getSubProtocols() {
+        // 只协商公开的协议名，不将携带 Token 的凭据回写到握手响应。
+        return List.of(AuthHandshakeInterceptor.VOICE_PROTOCOL);
+    }
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
