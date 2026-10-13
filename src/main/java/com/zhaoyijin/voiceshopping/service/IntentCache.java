@@ -31,6 +31,7 @@ public class IntentCache {
     }
 
     private String buildKey(String sessionId, String utterance) {
-        return "vs:intent_cache:" + sessionId + ":" + UtteranceFingerprint.compute(utterance);
+        // 隔离旧归一化规则产生的条目（旧规则会丢失小数点），旧条目按原 TTL 到期。
+        return "vs:intent_cache:v2:" + sessionId + ":" + UtteranceFingerprint.compute(utterance);
     }
 }

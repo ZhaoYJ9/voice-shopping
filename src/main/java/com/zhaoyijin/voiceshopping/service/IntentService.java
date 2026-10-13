@@ -36,7 +36,7 @@ public class IntentService {
                     ? CommonConfirmer.CONTINUE_INTENT : CommonConfirmer.CONFIRMER_INTENT;
         }
 
-        // 0) 先查缓存——5 分钟内同一会话说同样的话，跳过 LLM
+        // 0) 先查缓存——5 分钟内同一会话的已知等价口头表达归一化后命中，跳过 LLM
         IntentResult cached = cache.get(sessionId, utterance);
         if (cached != null) {
             log.debug("[Intent] 命中缓存 sessionId={} utterance={}", sessionId, utterance);
