@@ -16,8 +16,8 @@ class TtsServiceTest {
     private TtsService service() {
         TtsService service = new TtsService();
         ReflectionTestUtils.setField(service, "apiKey", "test-key");
-        ReflectionTestUtils.setField(service, "model", "cosyvoice-v1");
-        ReflectionTestUtils.setField(service, "voice", "longwan");
+        ReflectionTestUtils.setField(service, "model", "cosyvoice-v2");
+        ReflectionTestUtils.setField(service, "voice", "longwan_v2");
         return service;
     }
 

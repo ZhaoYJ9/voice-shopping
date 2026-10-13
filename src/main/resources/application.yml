@@ -51,8 +51,9 @@ voice-shopping:
     faq-threshold: 0.75
   voice:
     asr-model: paraformer-realtime-v2
-    tts-model: cosyvoice-v1
-    tts-voice: longwan           # 音色：温柔女声
+    # 模型与音色需成对设置；可通过环境变量覆盖。
+    tts-model: ${VOICE_SHOPPING_TTS_MODEL:cosyvoice-v2}
+    tts-voice: ${VOICE_SHOPPING_TTS_VOICE:longwan_v2}
   session:
     ttl-minutes: 30
     max-history-turns: 10
