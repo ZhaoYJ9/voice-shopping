@@ -207,6 +207,8 @@ java -jar target/zyj-voice-shopping-1.0-SNAPSHOT.jar
 
 应用启动时还会调用 TTS 服务预热短语缓存，需要可用的 DashScope API Key 与网络连接。
 
+本地开发也可运行 `mvn spring-boot:run`。代理、模型配置和 Maven 仓库错误的排查步骤见 [本地启动与常见错误](docs/local-startup.md)。
+
 ### 6. 生成商品向量
 
 导入演示数据后，调用向量重建接口为商品生成 Embedding：
