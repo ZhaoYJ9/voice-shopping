@@ -139,6 +139,19 @@ flowchart TD
 - 缺失或失效的 Token 会拒绝握手；异常凭据与会话参数也会被拒绝。会话服务进一步检查已有会话的所属用户。
 - 默认按同源策略接入页面。通过 HTTPS 代理转发到 HTTP 后端时，使用 `VOICE_SHOPPING_ALLOWED_ORIGINS` 显式配置外部页面的 Origin，例如 `https://shop.example`；多个来源以逗号分隔，不支持通配符或路径。远程访问使用 HTTPS/WSS，Token 校验发生在每次建立连接时。
 
+### HTTP 文本聊天鉴权
+
+`POST /api/v1/chat` 使用同一套 Sa-Token 登录态，请求头需携带 `Authorization: Bearer <token>`。
+用户身份从登录态读取，不再需要 `userId` 参数；旧请求即使传入该参数，也不会改变实际身份。
+缺失或失效的令牌返回 `401`，使用其他用户已有的会话返回 `403`。
+
+```bash
+curl -X POST 'http://localhost:8080/api/v1/chat?sessionId=your-session-id' \
+  -H 'Authorization: Bearer your-login-token' \
+  -H 'Content-Type: text/plain; charset=UTF-8' \
+  --data-raw '我想买一双跑鞋'
+```
+
 ## 快速开始
 
 以下步骤面向本地开发演示，需要自行准备 PostgreSQL、Redis 和可用的 DashScope API Key。
