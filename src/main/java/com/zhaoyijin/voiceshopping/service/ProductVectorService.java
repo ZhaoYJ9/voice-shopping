@@ -43,7 +43,7 @@ public class ProductVectorService {
 
         StringBuilder sql = new StringBuilder(
                 "SELECT id FROM product " +
-                        "WHERE status = 'ON_SALE' AND embedding IS NOT NULL");
+                        "WHERE status = 'ON_SALE' AND stock > 0 AND embedding IS NOT NULL");
         if (extraFilter != null && !extraFilter.isBlank()) {
             sql.append(" AND ").append(extraFilter);
         }
