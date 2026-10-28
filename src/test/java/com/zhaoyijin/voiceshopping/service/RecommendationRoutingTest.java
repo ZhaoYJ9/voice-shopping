@@ -100,7 +100,7 @@ class RecommendationRoutingTest {
     @Test void agreementStillConfirmsAnActualPendingOrder() {
         state.setPhase("ORDER_CONFIRM");
         when(pending.get("routing")).thenReturn(new PendingOrderStore.PendingOrder(
-                "routing", 1L, 1L, 6L, "Pegasus 39", "shoe6", 1, BigDecimal.valueOf(599), BigDecimal.valueOf(599)));
+                "routing", 1L, 1L, 6L, "Pegasus 39", "shoe6", 1, BigDecimal.valueOf(599), BigDecimal.valueOf(599), "preview-routing"));
         OrderEntity order = new OrderEntity(); order.setOrderNo("abcdef123456");
         when(orders.confirm("routing")).thenReturn(order);
         assertTrue(service.handle("routing", 1L, "可以。").speechText().contains("下单成功"));
