@@ -45,7 +45,7 @@ class OrchestratorOrderStateTest {
         state.setLastRecommendations(List.of(7L, 10L, 6L));
         when(states.load("purchase")).thenReturn(state);
         when(pending.get("purchase")).thenReturn(new PendingOrderStore.PendingOrder(
-                "purchase", 1L, 1L, 7L, "鞋7", "sku7", 1, BigDecimal.valueOf(699), BigDecimal.valueOf(699)));
+                "purchase", 1L, 1L, 7L, "鞋7", "sku7", 1, BigDecimal.valueOf(699), BigDecimal.valueOf(699), "preview-purchase"));
         when(orders.confirm("purchase")).thenReturn(completed());
         when(intents.classify(anyString(), anyString())).thenReturn(new IntentResult(Intent.ORDER_CONFIRM, Map.of(), .99));
     }
