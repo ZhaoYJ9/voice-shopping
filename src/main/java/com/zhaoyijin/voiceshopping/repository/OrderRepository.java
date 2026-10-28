@@ -8,6 +8,8 @@ import java.util.Optional;
 
 public interface OrderRepository extends JpaRepository<OrderEntity, Long> {
 
+    Optional<OrderEntity> findByOrderNo(String orderNo);
+
     // --- 列表查询：按主体 ---
     List<OrderEntity> findByUserIdOrderByCreatedAtDesc(Long userId);
     List<OrderEntity> findByMerchantIdOrderByCreatedAtDesc(Long merchantId);
