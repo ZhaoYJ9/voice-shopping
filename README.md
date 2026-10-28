@@ -124,12 +124,14 @@ flowchart TD
 推荐主链路由 `ParallelRecommendService` 组织：并行加载用户画像和检索候选商品，再进行排序与推荐理由生成。
 
 1. 将用户输入转换为查询向量，在 pgvector 中进行商品语义检索。
-2. 将预算、品类、商品属性和商家范围等条件合并到筛选逻辑中。
-3. 读取候选商品详情，并再次应用商家范围约束。
+2. 仅检索在售且库存大于零的商品，并叠加预算、品类、商品属性和商家范围条件；库存过滤在取前 K 个结果之前执行。
+3. 读取候选商品详情，保留商家范围约束，并再次排除已售罄或下架的商品，保持剩余候选的检索顺序。
 4. 通过 `ProfileReranker` 结合用户画像与当前需求调整排序。
 5. 取至多三款商品，生成推荐理由。同步推荐分支按配置加入多视角点评；页面的流式推荐分支直接进入流式回复生成。
 
 商家范围通过会话接口建立；当前语音演示页面不调用该接口，缺少范围配置时按全平台检索。
+
+推荐不预占库存，展示后仍可能被其他用户买走，最终库存由订单确认事务校验。
 
 ### 流式语音处理
 
@@ -313,6 +315,18 @@ mvn -Dtest=OrderConcurrencyIntegrationTest \
 Redis 仅使用随机测试会话键，不清空数据库。测试覆盖最后一件抢购、同预览并发确认、事务回滚、
 新预览替换、清理失败重试、通知失败、旧预览兼容和非法数量，不调用模型服务。
 完整后端回归时保留上述连接参数并去掉 `-Dtest`。本机代理导致连接失败时，参考[本地启动说明](docs/local-startup.md)。
+
+推荐库存过滤还提供真实 pgvector 集成测试（仅模拟 Embedding 模型调用）。在专用 PostgreSQL 的 `public` schema
+中预先安装 `vector` 扩展，然后运行：
+
+```bash
+mvn -Dtest=RecommendCandidatesServiceTest,ProductVectorAvailabilityIntegrationTest \
+  -Drecommendation.test.jdbc-url=jdbc:postgresql://127.0.0.1:55439/postgres \
+  -Drecommendation.test.db-user=order_test test
+```
+
+需要密码时可传 `-Drecommendation.test.db-password`。集成测试使用并清理随机独立 schema；未提供连接参数时跳过。
+测试覆盖库存过滤先于前 K 个结果截取、预算/商家/品类条件保留，以及详情读取时售罄或下架的情况。
 
 ## 当前限制
 
