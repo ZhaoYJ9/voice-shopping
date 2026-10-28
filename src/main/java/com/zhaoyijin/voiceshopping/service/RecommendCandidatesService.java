@@ -49,7 +49,9 @@ public class RecommendCandidatesService {
         List<RecommendedItem> out = new ArrayList<>();
         for (int i = 0; i < ids.size(); i++) {
             ProductEntity p = map.get(ids.get(i));
-            if (p == null) continue;  // 被 scope 过滤掉的 id，这里自然丢弃
+            // 向量召回后库存/上下架状态可能已变化，以详情查询时的状态再次校验。
+            if (p == null || !"ON_SALE".equals(p.getStatus())
+                    || p.getStock() == null || p.getStock() <= 0) continue;
             out.add(new RecommendedItem(p.getId(), p.getName(), p.getPrice(),
                     null, 1.0 - i * 0.03,
                     p.getAttributes() == null ? Map.of() : p.getAttributes()));
